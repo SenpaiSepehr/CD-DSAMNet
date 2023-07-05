@@ -1,4 +1,5 @@
 # coding=utf-8
+import sys
 import argparse
 import os
 import pandas as pd
@@ -13,11 +14,15 @@ from model.dsamnet import DSAMNet
 import numpy as np
 import random
 from train_options import parser
+from gpu_avail import get_unused_gpu
 
 opt = parser.parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpu_id
+device_ids = [4,5,6,7]
+os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, device_ids))
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# DataParallel gpu list start with index 0
+device_index = [num for num in range(len(device_ids))]
 
 def seed_torch(seed=2020):
     random.seed(seed)
@@ -28,7 +33,6 @@ def seed_torch(seed=2020):
 
 # set seeds
 seed_torch(2020)
-
 
 if __name__ == '__main__':
     # load data
@@ -42,8 +46,8 @@ if __name__ == '__main__':
     
     # use more than one gpu
     if torch.cuda.device_count() > 1:
-        print("Use", torch.cuda.device_count(), "GPUs!")
-        netCD = torch.nn.DataParallel(netCD, device_ids=range(torch.cuda.device_count()))    
+        print(f"Using GPU(s): {device_ids}")
+        netCD = torch.nn.DataParallel(netCD, device_ids=device_index)    
 
     # set optimization
     optimizerCD = optim.Adam(netCD.parameters(),lr= opt.lr, betas=(opt.beta1, 0.999))
@@ -54,7 +58,7 @@ if __name__ == '__main__':
 
     # training
     for epoch in range(1, opt.num_epochs + 1):
-        train_bar = tqdm(train_loader)
+        train_bar = tqdm(val_loader)
         running_results = {'batch_sizes': 0, 'Dice_loss':0, 'CT_loss':0, 'CD_loss': 0}
 
         netCD.train()
@@ -75,7 +79,7 @@ if __name__ == '__main__':
 
             # contrative loss
             label = torch.argmax(label, 1).unsqueeze(1).float()
-            CT_loss = CDcriterion(prob, label)
+            CT_loss = CDcriterion(prob, label)  # BCL.py def_forward(distance,label)
 
             # CD loss
             CD_loss =  CT_loss + opt.wDice *Dice_loss
@@ -93,10 +97,10 @@ if __name__ == '__main__':
                 desc='[%d/%d] CD: %.4f  ' % (
                     epoch, opt.num_epochs, running_results['CD_loss'] / running_results['batch_sizes'],
                     ))
-
+        #print(f"train: label{label.size()}, prob{prob.size()}")
+        
         # eval
         netCD.eval()
-
         with torch.no_grad():
             val_bar = tqdm(val_loader)
             inter, unin = 0,0
@@ -109,19 +113,24 @@ if __name__ == '__main__':
                 image1 = image1.to(device, dtype=torch.float)
                 image2 = image2.to(device, dtype=torch.float)
                 label = label.to(device, dtype=torch.float)
+                # (16,2,256,256)
 
                 prob, ds2, ds3 = netCD(image1, image2)
+                label = torch.argmax(label, 1).unsqueeze(1) #(16,256,256) without unsqueeze
 
-                label = torch.argmax(label, 1).unsqueeze(1)
+                # label size (16,1,256,256) , prob size (16,64,256,256)
+                # prob sizr explained in section C. Metric Module
 
                 gt_value = (label > 0).float()
                 prob = (prob > 1).float()
-                prob = prob.cpu().detach().numpy()
-                gt_value = gt_value.cpu().detach().numpy()
-                gt_value = np.squeeze(gt_value)
-                result = np.squeeze(prob)
 
-                intr, unn = calMetric_iou(gt_value, result)
+                prob = prob.cpu().detach().numpy()         #(16,64,256,256)
+                gt_value = gt_value.cpu().detach().numpy() #(16,1,256,256)
+
+                # gt_value = np.squeeze(gt_value) #(16,256,256)
+                result = np.squeeze(prob)       #(16,256,256))
+
+                intr, unn = calMetric_iou(gt_value, result)  #flip arguments?
                 inter = inter + intr
                 unin = unin + unn
 
