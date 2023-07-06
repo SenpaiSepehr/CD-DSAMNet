@@ -15,9 +15,9 @@ def is_image_file(filename):
 
 def calMetric_iou(predict, label):
     tp = np.sum(np.logical_and(predict == 1, label == 1))
-    fp = np.sum(predict==1)
-    fn = np.sum(label == 1)
-    return tp,fp+fn-tp
+    fp = np.sum(np.logical_and(predict ==1, label == 0))
+    fn = np.sum(np.logical_and(predict == 0, label == 1))
+    return tp,fp+fn+tp
 
 
 def calculate_valid_crop_size(crop_size, upscale_factor):
@@ -101,7 +101,7 @@ class LoadDatasetFromFolder(Dataset):
         return len(self.hr1_filenames)
     
     
- class TestDatasetFromFolder(Dataset):
+class TestDatasetFromFolder(Dataset):
     def __init__(self, Time1_dir, Time2_dir, Label_dir, image_sets):
         super(TestDatasetFromFolder, self).__init__()
 
