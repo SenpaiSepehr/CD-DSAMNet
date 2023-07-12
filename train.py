@@ -16,8 +16,9 @@ import random
 from train_options import parser
 from gpu_avail import get_unused_gpu
 
+
 opt = parser.parse_args()
-device_ids = [4,5,6,7]
+device_ids = [6,7]
 os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, device_ids))
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -54,7 +55,7 @@ if __name__ == '__main__':
     CDcriterion = BCL().to(device, dtype=torch.float)
     CDcriterion1 = DiceLoss().to(device, dtype=torch.float)
 
-    results = {'train_loss': [], 'train_CT':[], 'train_Dice':[],'val_IoU': []}
+    results = {'train_loss': [], 'train_CT':[], 'train_Dice':[],'val_IoU': [], 'F1': []}
     
     best_stat_dict = None
     best_val_IoU = 0.0
@@ -62,7 +63,7 @@ if __name__ == '__main__':
 
     # training
     for epoch in range(1, opt.num_epochs + 1):
-        train_bar = tqdm(val_loader)
+        train_bar = tqdm(train_loader)
         running_results = {'batch_sizes': 0, 'Dice_loss':0, 'CT_loss':0, 'CD_loss': 0}
 
         netCD.train()
@@ -73,8 +74,12 @@ if __name__ == '__main__':
             image2 = image2.to(device, dtype=torch.float)
             label = label.to(device, dtype=torch.float) # one-hot label^
             #(16,2,256,256)
-            
-            prob, ds2, ds3 = netCD(image1, image2)
+            # for i in range(label.size(1)):
+            #     channel = label[:, i, :, :]  # Extract the channel
+            #     print(f"Channel {i+1}:")
+            #     print(channel)
+            #     print()
+            prob, ds2, ds3 = netCD(image1, image2) # prob = euclidean dist.
 
             #Diceloss
             dsloss2 = CDcriterion1(ds2, label)
@@ -84,8 +89,9 @@ if __name__ == '__main__':
 
             # contrative loss
             label = torch.argmax(label, 1).unsqueeze(1).float()
+            # print("label after argmax")
+            # print(label)
             #(16,1,256,256)
-
             CT_loss = CDcriterion(prob, label)  # BCL.py def_forward(distance,label)
 
             # CD loss
@@ -110,8 +116,9 @@ if __name__ == '__main__':
         with torch.no_grad():
             val_bar = tqdm(val_loader)
             inter, unin = 0,0
+            precision, recall = 0,0
             valing_results = {'CD_loss': 0, 'batch_sizes': 0, 'Dice_loss':0, 'CT_loss':0,
-                              'IoU': 0}
+                              'IoU': 0, 'F1': 0}
 
             for image1, image2,  label in val_bar:
                 valing_results['batch_sizes'] += opt.val_batchsize
@@ -119,30 +126,53 @@ if __name__ == '__main__':
                 image1 = image1.to(device, dtype=torch.float)
                 image2 = image2.to(device, dtype=torch.float)
                 label = label.to(device, dtype=torch.float)
-                # (16,2,256,256)
+                # (16,2,256,256), channel0 = no change, channel1(change)
 
                 prob, ds2, ds3 = netCD(image1, image2)
-                label = torch.argmax(label, 1).unsqueeze(1)
+                label = torch.argmax(label, 1).unsqueeze(1) # indexes
                 # label size (16,1,256,256) , prob size (16,64,256,256)
-                # prob sizr explained in section C. Metric Module
 
-                gt_value = (label > 0).float()
-                prob = (prob > 1).float()
-
-                prob = prob.cpu().detach().numpy()         #(16,64,256,256)
-                gt_value = gt_value.cpu().detach().numpy() #(16,1,256,256)
+                prob = (prob > 1).float() # thresholding step
+                #prob = prob.cpu().detach().numpy()
+                
+                gt_value = (label > 0).float() # changing index to float, value remains
+                #gt_value = gt_value.cpu().detach().numpy()
 
                 #gt_value = np.squeeze(gt_value) #(16,256,256)
-                result = np.squeeze(prob)       #(16,64,256,256))
+                result = np.squeeze(prob)       #(16,64,256,256)
 
-                intr, unn = calMetric_iou(result, gt_value)  #flip arguments?
+                """
+                intr, unn = calMetric_iou(result, gt_value)
                 inter = inter + intr
                 unin = unin + unn
                 IoU = inter * 1.0 / unin
+                """
+                # Calculating IoU using Intersection / Union
+                intr = torch.sum(result*gt_value)
+                unn = torch.sum(result) + torch.sum(gt_value) - intr
+
+                inter = inter + intr
+                unin = unin + unn
+                IoU = (inter / unin).cpu().detach().numpy()
+
                 val_bar.set_description(
                     desc='IoU: %.4f' % (IoU))
+                
+                # Calculating F-1 Score
+                tp = torch.sum((result == 1) & (gt_value == 1)).item()
+                fp = torch.sum((result == 1) & (gt_value == 0)).item()
+                fn = torch.sum((result == 0) & (gt_value == 1)).item()
 
+                prec = tp / (tp + fp)
+                rec = tp / (tp + fn)
+
+                precision = precision + prec
+                recall = recall + rec
+                F1 = 2 * (precision * recall) / (precision + recall)
+
+            
             valing_results['IoU'] = IoU
+            valing_results['F1'] = F1
 
         # save model parameters
         val_loss = valing_results['IoU']
@@ -151,17 +181,18 @@ if __name__ == '__main__':
         results['train_CT'].append(running_results['CT_loss'] / running_results['batch_sizes'])
         results['train_Dice'].append(running_results['Dice_loss'] / running_results['batch_sizes'])
         results['val_IoU'].append(valing_results['IoU'])
+        results['F1'].append(valing_results['F1'])
 
-        if val_loss > 0.5 or epoch==1:
-            if val_loss > best_val_IoU:
-                best_val_IoU = val_loss
-                best_epoch = epoch
-                best_stat_dict = netCD.state_dict()
+        if val_loss > best_val_IoU:
+            best_val_IoU = val_loss
+            best_epoch = epoch
+            best_stat_dict = netCD.state_dict()
 
         if epoch % 1 == 0 :
             data_frame = pd.DataFrame(
                 data={'train_loss': results['train_loss'],
-                      'val_IoU': results['val_IoU']},
+                      'val_IoU': results['val_IoU'],
+                      'F1': results[F1]},
                 index=range(1, epoch + 1))
             data_frame.to_csv(opt.sta_dir, index_label='Epoch')
 
