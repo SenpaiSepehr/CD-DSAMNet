@@ -16,14 +16,13 @@ class BCL(nn.Module):
         label[label == 0] = 1
 
         mask = (label != 255).float()
-        distance = distance * mask
-
-        pos_num = torch.sum((label==1).float())+0.0001
+        distance = distance * mask    # mask tensor shape likely broadcasted to match distance
+        pos_num = torch.sum((label==1).float())+0.0001 # prevent division by 0
         neg_num = torch.sum((label==-1).float())+0.0001
 
-        loss_1 = torch.sum((1+label) / 2 * torch.pow(distance, 2)) /pos_num
+        loss_1 = torch.sum((1+label) / 2 * torch.pow(distance, 2)) /pos_num # no change pixels
         loss_2 = torch.sum((1-label) / 2 *
             torch.pow(torch.clamp(self.margin - distance, min=0.0), 2)
-        ) / neg_num
+        ) / neg_num # changed pixels
         loss = loss_1 + loss_2
         return loss

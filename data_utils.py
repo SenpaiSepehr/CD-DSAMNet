@@ -14,10 +14,86 @@ def is_image_file(filename):
 
 
 def calMetric_iou(predict, label):
-    tp = np.sum(np.logical_and(predict == 1, label == 1))
-    fp = np.sum(np.logical_and(predict ==1, label == 0))
-    fn = np.sum(np.logical_and(predict == 0, label == 1))
-    return tp,fp+fn+tp
+    tp = torch.sum((predict == 1) & (label == 1)).item()
+    fp = torch.sum((predict == 1) & (label == 0)).item()
+    fn = torch.sum((predict == 0) & (label == 1)).item()
+
+    return tp,fp,fn
+
+def predict_compressor(predict):
+
+    """
+    batch_size, num_channels, width, height = predict.shape
+    new_predict = torch.zeros(batch_size, 1, width, height)
+
+    for i in range(batch_size):
+        for x in range(width):
+            for y in range(height):
+
+                ones_count = torch.sum(predict[i,:,x,y] == 1)
+                zeros_count = num_channels - ones_count
+
+                if ones_count > zeros_count:
+                    new_predict[i,0,x,y] = 1
+    """
+    new_pred = (torch.sum(predict, dim=1) > 32).float().unsqueeze(1)
+
+    return new_pred
+
+
+def batch_fscore(predict, label):
+
+    total_img_f1, batchf1 = 0,0
+
+    for batch_id in range(predict.shape[0]):
+        predict_img = predict[batch_id]
+        label_img = label[batch_id]
+
+        tp = torch.sum((predict_img == 1) & (label_img == 1)).item()+0.0001
+        fp = torch.sum((predict_img == 1) & (label_img == 0)).item()+0.0001
+        fn = torch.sum((predict_img == 0) & (label_img == 1)).item()+0.0001
+
+        # f1-score of individual image-pairs
+        prec = tp / (tp + fp)
+        rec = tp / (tp + fn)
+        #print(tp,fp,fn)
+        fscore = round((2 * (prec * rec) / (prec + rec)), 4)
+
+        # saving total fscores
+        total_img_f1 += fscore
+    
+    # batch f-score by averaging over batch size
+    batchf1 = total_img_f1 / predict.shape[0]
+
+    return batchf1
+
+
+def batch_iou(predict, label):
+
+    total_img_iou, batchIou = 0,0
+
+    for batch_id in range(predict.shape[0]):
+        predict_img = predict[batch_id]
+        label_img = label[batch_id]
+
+        # # operations in a 1D tensor are more efficient
+        # predict_flat = predict_img.view(predict_img.shape[1], -1)
+        # label_flat = label_img.view(label_img.shape[1], -1)
+
+        # calculate individual image-pair iou
+        tp = torch.sum((predict_img == 1) & (label_img == 1)).item()
+        fp = torch.sum((predict_img == 1) & (label_img == 0)).item()
+        fn = torch.sum((predict_img == 0) & (label_img == 1)).item()
+
+        img_iou = round((tp / (tp+fp+fn)), 4)
+
+        # accumulate all image iou
+        total_img_iou += img_iou
+
+    # batch iou by averaging over batch size
+    batchIou = total_img_iou / 16
+
+    return batchIou
 
 
 def calculate_valid_crop_size(crop_size, upscale_factor):
